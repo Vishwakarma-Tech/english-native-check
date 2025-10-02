@@ -56,9 +56,19 @@ export default function App() {
             />
           </div>
         ))}
-        <button disabled={loading} style={{padding:"0.6rem 1rem"}}>
-          {loading ? "Scoring..." : "Get Score"}
-        </button>
+       <button
+  disabled={loading}
+  style={{
+    padding: "0.6rem 1rem",
+    backgroundColor: loading ? "#666" : "#333",  // dark gray/black
+    color: "white",
+    border: "none",
+    borderRadius: "4px",
+    cursor: loading ? "not-allowed" : "pointer"
+  }}
+>
+  {loading ? "Scoring..." : "Get Score"}
+</button>
       </form>
 
       {error && <p style={{color:"crimson"}}>{error}</p>}
