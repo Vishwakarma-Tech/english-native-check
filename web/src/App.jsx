@@ -38,6 +38,9 @@ export default function App() {
   return (
     <div style={{maxWidth:760, margin:"2rem auto", fontFamily:"system-ui, sans-serif"}}>
       <h1>Native-like English Check</h1>
+	<p style={{ fontSize: "0.9rem", color: "#666", marginTop: "-0.5rem" }}>			
+           Created by Vik Gadgil – AI Lab Project – using OpenRouter LLM broker
+	</p>
       <p>Answer four prompts. We’ll score native-likeness (0–10) and suggest improvements.</p>
 
       <form onSubmit={submit}>
