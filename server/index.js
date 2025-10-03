@@ -1,7 +1,10 @@
-// index.js — robust, normalized, with mock and JSON rescue
-// How to run:
-// 1) Put .env in THIS folder with OPENROUTER_* and PORT (see README above).
-// 2) npm start
+// index.js — robust API with 4-part rubric, strict JSON, normalization, and mock
+// Requires .env in THIS folder:
+// OPENROUTER_API_KEY=sk-or-...
+// OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+// OPENROUTER_MODEL=z-ai/glm-4.5-air:free
+// PORT=8787
+// (optional) CORS_ALLOW_ORIGIN=http://127.0.0.1:5174,https://<your-vercel-app>.vercel.app
 
 import dotenv from 'dotenv';
 dotenv.config();
@@ -17,7 +20,7 @@ const app = express();
 const corsOrigins =
   process.env.CORS_ALLOW_ORIGIN?.split(',').map(s => s.trim()).filter(Boolean) || '*';
 app.use(cors({ origin: corsOrigins }));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 app.use('/assess', rateLimit({ windowMs: 60_000, max: 20 }));
 
 // ---------- Validation ----------
@@ -27,24 +30,44 @@ const AnswersSchema = z.object({
 
 // ---------- OpenRouter client ----------
 const BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
-const MODEL = process.env.OPENROUTER_MODEL || 'mistralai/mistral-7b-instruct:free';
+const MODEL = process.env.OPENROUTER_MODEL || 'z-ai/glm-4.5-air:free';
 const client = new OpenAI({ apiKey: process.env.OPENROUTER_API_KEY, baseURL: BASE_URL });
 
-// ---------- Prompts ----------
-const SYSTEM_PROMPT = 'You are a calibrated linguistics examiner.';
+// ---------- Prompts (UPDATED for your 4-part test) ----------
+const SYSTEM_PROMPT = 'You are a calibrated linguistics examiner. Output STRICT JSON only.';
 const STRICT_JSON_INSTR = `
-Return ONLY a JSON object with this exact schema and nothing else:
+You are evaluating a four-part English proficiency test. Return ONLY one JSON object with this exact schema and nothing else:
 
 {
   "score": number,            // integer 0-10
   "level": "Beginner"|"Intermediate"|"Advanced"|"Near-native"|"Native-like",
-  "reasons": string,          // 1-2 sentences
-  "suggestions": string[]     // 3 concise tips
+  "reasons": string,          // 2-4 concise sentences; mention each part briefly
+  "suggestions": string[]     // 3-5 concise, actionable tips
 }
 
-Scoring:
-0-2 basic; 3-4 limited; 5-6 functional; 7-8 strong; 9 near-native; 10 native-like.
-Penalize canned/memorized text. Consider grammar, vocabulary range, collocations, coherence, register, naturalness.
+Test structure and rubric (overall score = weighted sum; round to nearest integer):
+- Part 1: Short Writing (40%)
+  Prompt: "If you suddenly had a free week with no responsibilities, how would you spend it?"
+  Judge: coherence, grammar, vocabulary range, natural collocations, flow, register. Penalize robotic or memorized text.
+- Part 2: Idiom Meaning (20%)
+  Idiom: "That project was a blessing in disguise."
+  Judge: whether the user explains that something initially negative/hidden actually led to a positive outcome.
+- Part 3: Word Choice (20%)
+  Items (choose the more natural option):
+   • "Let’s meet in the evening / on the evening." → natural: "in the evening"
+   • "She suggested to go / going for a walk."     → natural: "going"
+   • "I’m looking forward to meet / to meeting you."→ natural: "to meeting"
+  Judge: accuracy of selected forms and awareness of idiomatic usage.
+- Part 4: Subtle Grammar (20%)
+  Fill-in: "If I ___ known about the traffic, I would have left earlier."
+  Natural completion: "had" → "If I had known…"
+  Judge: correct tense/form; penalize incorrect or awkward alternatives.
+
+Output guidelines:
+- Produce ONE overall integer score 0–10 using the weights above.
+- "reasons": summarize strengths/weaknesses across the four parts (one clause per part is fine).
+- "suggestions": concrete next steps (e.g., collocations, articles, conditionals, gerund/infinitive practice).
+- Do NOT echo the full answers or include any preamble or markdown. Strict JSON only.
 `;
 
 // ---------- Health ----------
@@ -73,8 +96,24 @@ function normalizeResult(out) {
     reasons: obj?.reasons || 'Results normalized.',
     suggestions: Array.isArray(obj?.suggestions) && obj.suggestions.length
       ? obj.suggestions
-      : ['Keep practicing.']
+      : ['Practice collocations and article usage.', 'Review conditionals (3rd).', 'Reinforce gerund/infinitive patterns.']
   };
+}
+
+async function askOnce({ system, user, max_tokens = 700 }) {
+  const r = await client.chat.completions.create({
+    model: MODEL,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ],
+    temperature: 0.0,
+    top_p: 0.1,
+    max_tokens,
+    // many models honor this; some ignore (we still parse/normalize)
+    response_format: { type: 'json_object' }
+  });
+  return r.choices?.[0]?.message?.content ?? '';
 }
 
 // ---------- Route ----------
@@ -93,57 +132,56 @@ app.post('/assess', async (req, res) => {
       return res.json({
         score: 7,
         level: 'Advanced',
-        reasons: 'Mostly natural phrasing with minor non-native choices.',
+        reasons: 'Strong writing (P1), correct idiom meaning (P2); minor issues in word choice (P3) and conditional form (P4).',
         suggestions: [
           'Vary sentence openings to avoid repetition.',
-          'Use idiomatic connectors (e.g., “that said”).',
-          'Tighten article usage in complex sentences.'
+          'Practice gerund vs. infinitive after common verbs (e.g., suggest + gerund).',
+          'Reinforce 3rd conditional forms ("If I had known…").',
+          'Review common time expressions ("in the evening").'
         ]
       });
     }
 
-    const userText = parsed.data.answers.map((a, i) => `Q${i + 1}:\n${a}`).join('\n\n');
+    // Label each part explicitly for the model
+    const [a1, a2, a3, a4] = parsed.data.answers;
+    const userText = [
+      `Part 1 — Candidate answer:\n${a1}`,
+      `Part 2 — Candidate answer:\n${a2}`,
+      `Part 3 — Candidate answer:\n${a3}`,
+      `Part 4 — Candidate answer:\n${a4}`
+    ].join('\n\n');
 
-    // Primary attempt (no response_format for compatibility)
+    // Attempt 1: main instruction
     console.time('llm-call-1');
-    const r1 = await client.chat.completions.create({
-      model: MODEL,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: STRICT_JSON_INSTR + `\n\nEvaluate these four answers:\n\n${userText}` }
-      ],
-      temperature: 0.0,
-      top_p: 0.1,
-      max_tokens: 700
+    const raw1 = await askOnce({
+      system: SYSTEM_PROMPT,
+      user: STRICT_JSON_INSTR + `\n\nEvaluate the following four parts and output exactly one JSON object:\n\n${userText}`
     });
     console.timeEnd('llm-call-1');
 
-    let raw = r1.choices?.[0]?.message?.content ?? '';
     let out;
     try {
-      out = extractJson(raw);
+      out = extractJson(raw1);
     } catch (e1) {
-      console.warn('Parse failed once, retrying. Reason:', e1?.message);
+      console.warn('Parse failed once. First 200 chars of raw1:', String(raw1).slice(0, 200));
 
-      // Retry with even stricter instruction
+      // Attempt 2: even stricter instruction
       console.time('llm-call-2');
-      const r2 = await client.chat.completions.create({
-        model: MODEL,
-        messages: [
-          { role: 'system', content: 'Output STRICT JSON only. No preamble, no extra words.' },
-          { role: 'user', content: `Schema: {"score":number,"level":"Beginner"|"Intermediate"|"Advanced"|"Near-native"|"Native-like","reasons":string,"suggestions":string[]}\n\nEvaluate:\n${userText}` }
-        ],
-        temperature: 0.0,
-        top_p: 0.1,
-        max_tokens: 700
+      const raw2 = await askOnce({
+        system: 'Output STRICT JSON only. No preamble, no extra text, no markdown.',
+        user: `Schema: {"score":number,"level":"Beginner"|"Intermediate"|"Advanced"|"Near-native"|"Native-like","reasons":string,"suggestions":string[]}\n\nEvaluate these four parts:\n${userText}\n\nReturn ONE JSON object only.`
       });
       console.timeEnd('llm-call-2');
 
-      const raw2 = r2.choices?.[0]?.message?.content ?? '';
-      out = extractJson(raw2);
+      try {
+        out = extractJson(raw2);
+      } catch (e2) {
+        console.error('Parse failed twice. First 200 chars of raw2:', String(raw2).slice(0, 200));
+        return res.status(500).json({ error: 'Assessment failed', detail: 'Model did not return JSON' });
+      }
     }
 
-    // Normalize and validate final shape
+    // Normalize + validate final shape
     const normalized = normalizeResult(out);
     const ResultSchema = z.object({
       score: z.number().int().min(0).max(10),

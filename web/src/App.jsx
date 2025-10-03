@@ -4,11 +4,15 @@ import ky from 'ky';
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8787';
 
 const QUESTIONS = [
-  "Describe your typical weekday in 3–5 sentences.",
-  "Tell me about a surprising project outcome and why it was surprising.",
-  "Make plans with a friend for this evening (2–4 sentences).",
-  "If you had a free week, what would you do?"
+  "Part 1: Short Writing Test\nWrite 3–4 sentences answering this:\n“If you suddenly had a free week with no responsibilities, how would you spend it?”",
+
+  "Part 2: Idioms & Expressions\nTell me what this idiom means in your own words:\n“That project was a blessing in disguise.”",
+
+  "Part 3: Word Choice\nChoose the option that sounds most natural:\n- Let’s meet in the evening / on the evening.\n- She suggested to go / going for a walk.\n- I’m looking forward to meet / to meeting you.",
+
+  "Part 4: Subtle Grammar\nFill in the blank:\n“If I ___ known about the traffic, I would have left earlier.”"
 ];
+
 
 export default function App() {
   const [answers, setAnswers] = useState(["","","",""]);
