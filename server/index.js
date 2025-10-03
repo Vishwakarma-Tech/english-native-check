@@ -1,12 +1,12 @@
-// index.js — robust API with 4-part rubric, OpenRouter headers, compatible params,
-// strict JSON parsing/normalization, mock mode, and helpful logs.
+// index.js — robust API with Render proxy support, 4-part rubric, OpenRouter headers,
+// compatible params, strict JSON parsing/normalization, mock mode, and helpful logs.
 //
-// .env on Render:
+// Required env (Render):
 // OPENROUTER_API_KEY=sk-or-...
 // OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 // OPENROUTER_MODEL=z-ai/glm-4.5-air:free
 // PUBLIC_APP_URL=https://<your-vercel-app>.vercel.app
-// CORS_ALLOW_ORIGIN=https://<your-vercel-app>.vercel.app
+// CORS_ALLOW_ORIGIN=https://<your-vercel-app>.vercel.app,http://127.0.0.1:5174
 // PORT=8787
 
 import dotenv from 'dotenv';
@@ -18,20 +18,37 @@ import rateLimit from 'express-rate-limit';
 import OpenAI from 'openai';
 import { z } from 'zod';
 
-// ---------- App ----------
 const app = express();
-const corsOrigins =
-  process.env.CORS_ALLOW_ORIGIN?.split(',').map(s => s.trim()).filter(Boolean) || '*';
-app.use(cors({ origin: corsOrigins }));
-app.use(express.json({ limit: '1mb' }));
-app.use('/assess', rateLimit({ windowMs: 60_000, max: 20 }));
 
-// ---------- Validation ----------
+// --- IMPORTANT: behind Render proxy, trust it so req.ip works and rate limiter is happy
+app.set('trust proxy', true); // or 1
+
+// --- CORS
+const rawCors = process.env.CORS_ALLOW_ORIGIN || '';
+const corsOrigins = rawCors
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+app.use(cors({ origin: corsOrigins.length ? corsOrigins : '*' }));
+
+app.use(express.json({ limit: '1mb' }));
+
+// --- Rate limit (safe headers + key; avoids the X-Forwarded-For warning)
+const limiter = rateLimit({
+  windowMs: 60_000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req /*, res*/) => req.ip || 'unknown'
+});
+app.use('/assess', limiter);
+
+// --- Validation
 const AnswersSchema = z.object({
   answers: z.array(z.string().min(1, 'answer cannot be empty')).length(4, 'need exactly 4 answers')
 });
 
-// ---------- OpenRouter client ----------
+// --- OpenRouter client
 const BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
 const MODEL = process.env.OPENROUTER_MODEL || 'z-ai/glm-4.5-air:free';
 const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || 'https://english-native-check.vercel.app';
@@ -39,14 +56,14 @@ const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || 'https://english-native-che
 const client = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
   baseURL: BASE_URL,
-  // These headers help routing/allowance on free tiers
   defaultHeaders: {
+    // Recommended by OpenRouter to improve routing/allowance on free tiers
     'HTTP-Referer': PUBLIC_APP_URL,
     'X-Title': 'English Native Check'
   }
 });
 
-// ---------- Prompts (4-part test rubric) ----------
+// --- Prompts (4-part rubric)
 const SYSTEM_PROMPT = 'You are a calibrated linguistics examiner. Output STRICT JSON only.';
 const STRICT_JSON_INSTR = `
 You are evaluating a four-part English proficiency test. Return ONLY one JSON object with this exact schema and nothing else:
@@ -83,10 +100,10 @@ Output guidelines:
 - Do NOT echo the full answers or include any preamble or markdown. Strict JSON only.
 `;
 
-// ---------- Health ----------
+// --- Health
 app.get('/', (_req, res) => res.send('OK'));
 
-// ---------- Helpers ----------
+// --- Helpers
 function extractJson(raw) {
   if (!raw || typeof raw !== 'string') throw new Error('Empty response');
   let s = raw.trim();
@@ -112,21 +129,21 @@ function normalizeResult(out) {
 }
 
 async function askOnce({ system, user, max_tokens = 700 }) {
-  // NOTE: keep params broadly compatible (some free providers 400 on response_format)
+  // Broadly compatible params (some free providers 400 on response_format)
   const r = await client.chat.completions.create({
     model: MODEL,
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user }
     ],
-    temperature: 0.0,   // stable outputs
-    top_p: 1.0,         // broad compatibility
-    max_tokens          // conservative cap
+    temperature: 0.0,
+    top_p: 1.0,
+    max_tokens
   });
   return r.choices?.[0]?.message?.content ?? '';
 }
 
-// ---------- Route ----------
+// --- Route
 app.post('/assess', async (req, res) => {
   try {
     console.log('POST /assess', new Date().toISOString(), 'mock=', req.query.mock);
@@ -173,7 +190,7 @@ app.post('/assess', async (req, res) => {
     } catch (e1) {
       console.warn('Parse failed once. First 200 chars of raw1:', String(raw1).slice(0, 200));
 
-      // Attempt 2: stricter wording
+      // Attempt 2
       console.time('llm-call-2');
       const raw2 = await askOnce({
         system: 'Output STRICT JSON only. No preamble, no extra text, no markdown.',
@@ -217,12 +234,12 @@ app.post('/assess', async (req, res) => {
   }
 });
 
-// ---------- Start ----------
+// --- Start
 const port = process.env.PORT || 8787;
 app.listen(port, () => {
   console.log(`API running at http://localhost:${port}`);
   console.log(`Model: ${MODEL}`);
   console.log(`Base URL: ${BASE_URL}`);
   console.log(`Public app URL: ${PUBLIC_APP_URL}`);
-  console.log(`CORS allow: ${Array.isArray(corsOrigins) ? corsOrigins.join(', ') : corsOrigins}`);
+  console.log(`CORS allow: ${corsOrigins.length ? corsOrigins.join(', ') : '*'}`);
 });
