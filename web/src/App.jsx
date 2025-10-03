@@ -1,21 +1,14 @@
-// web/src/App.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "https://english-native-check.onrender.com";
 
-// fetch with timeout
 async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...options, signal: ac.signal, cache: "no-store" });
-    return res;
-  } finally {
-    clearTimeout(t);
-  }
+  try { return await fetch(url, { ...options, signal: ac.signal, cache: "no-store" }); }
+  finally { clearTimeout(t); }
 }
 
-// wake server
 async function wakeServer({ healthUrl, maxAttempts = 6, startBackoffMs = 500, timeoutMs = 12000 }) {
   let backoff = startBackoffMs;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -25,7 +18,7 @@ async function wakeServer({ healthUrl, maxAttempts = 6, startBackoffMs = 500, ti
       const r2 = await fetchWithTimeout(healthUrl, { method: "GET", mode: "cors" }, timeoutMs);
       if (r2.ok || (r2.status >= 200 && r2.status < 400)) return;
     } catch {}
-    await new Promise((res) => setTimeout(res, backoff));
+    await new Promise(res => setTimeout(res, backoff));
     backoff = Math.min(backoff * 2, 7000);
   }
   throw new Error("Server did not wake in time");
@@ -41,16 +34,14 @@ export default function App() {
   const [serverModel, setServerModel] = useState("");
 
   const tickerRef = useRef(null);
-  function startTicker(){ stopTicker(); setSeconds(0); tickerRef.current=setInterval(()=>setSeconds(s=>s+1),1000); }
-  function stopTicker(){ if (tickerRef.current){ clearInterval(tickerRef.current); tickerRef.current=null; } }
+  const startTicker = () => { stopTicker(); setSeconds(0); tickerRef.current = setInterval(() => setSeconds(s => s + 1), 1000); };
+  const stopTicker  = () => { if (tickerRef.current) { clearInterval(tickerRef.current); tickerRef.current = null; } };
 
-  // prewarm + read /meta
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
         setPhase("prewarming");
-        // Try to read /meta (may fail if cold; that's okay)
         try {
           const m = await fetchWithTimeout(`${API_BASE}/meta`, { method: "GET", mode: "cors" }, 8000);
           if (m?.ok) {
@@ -58,7 +49,6 @@ export default function App() {
             if (mounted && j?.model) setServerModel(j.model);
           }
         } catch {}
-        // Light prewarm
         await wakeServer({ healthUrl: `${API_BASE}/`, maxAttempts: 3, startBackoffMs: 300, timeoutMs: 8000 });
       } catch {} finally {
         if (mounted) setPhase("idle");
@@ -77,11 +67,9 @@ export default function App() {
     setErrMsg(""); setResult(null);
 
     try {
-      // 1) wake
       setPhase("waking"); startTicker();
       await wakeServer({ healthUrl: `${API_BASE}/` });
 
-      // 2) submit
       setPhase("submitting");
       const res = await fetchWithTimeout(
         `${API_BASE}/assess${mocking ? "?mock=1" : ""}`,
@@ -89,7 +77,6 @@ export default function App() {
         30000
       );
 
-      // read header fallback
       const headerModel = res.headers?.get("x-model");
       if (headerModel && !serverModel) setServerModel(headerModel);
 
@@ -99,7 +86,6 @@ export default function App() {
       }
       const data = await res.json();
 
-      // prefer body meta
       const bodyModel = data?._meta?.model;
       if (bodyModel) setServerModel(bodyModel);
       else if (headerModel && !serverModel) setServerModel(headerModel);
@@ -109,95 +95,77 @@ export default function App() {
     } catch (err) {
       setErrMsg(err?.message || "Submission failed");
       setPhase("error");
-    } finally {
-      stopTicker();
-    }
+    } finally { stopTicker(); }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6">
-      <div className="w-full max-w-3xl bg-white shadow-lg rounded-2xl p-6">
-        <h1 className="text-2xl font-semibold mb-1">English Native Check</h1>
-        <p className="text-sm text-gray-600 mb-6">
-          First run on the free tier may take a few seconds while the server wakes up.
-        </p>
+    <div className="py-10">
+      <div className="container">
+        <header className="mb-6">
+          <h1 className="text-2xl font-semibold">English Native Check</h1>
+          <p className="subtle">First run on the free tier may take a few seconds while the server wakes up.</p>
+        </header>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {[
-            "Part 1 — short paragraph (3–4 sentences)",
-            "Part 2 — explain the idiom 'blessing in disguise'",
-            "Part 3 — choose the natural options (e.g., 'in the evening; suggested going; looking forward to meeting')",
-            "Part 4 — fill: If I ___ known, I would have…",
-          ].map((label, i) => (
-            <div key={i}>
-              <label className="block text-sm font-medium mb-1">{label}</label>
-              <textarea
-                value={answers[i]}
-                onChange={(e) => { const copy = answers.slice(); copy[i] = e.target.value; setAnswers(copy); }}
-                className="w-full border rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-black/60"
-                rows={i === 0 ? 4 : 3}
-                placeholder={`Type your answer for ${label.toLowerCase()}`}
-              />
+        <main className="card">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {[
+              "Part 1 — short paragraph (3–4 sentences)",
+              "Part 2 — explain the idiom 'blessing in disguise'",
+              "Part 3 — choose the natural options (e.g., 'in the evening; suggested going; looking forward to meeting')",
+              "Part 4 — fill: If I ___ known, I would have…",
+            ].map((label, i) => (
+              <div key={i}>
+                <label className="label">{label}</label>
+                <textarea
+                  value={answers[i]}
+                  onChange={(e) => { const copy = answers.slice(); copy[i] = e.target.value; setAnswers(copy); }}
+                  className="input"
+                  rows={i === 0 ? 4 : 3}
+                  placeholder={`Type your answer for ${label.toLowerCase()}`}
+                />
+              </div>
+            ))}
+
+            <div className="flex items-center justify-between gap-3">
+              <label className="inline-flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={mocking} onChange={() => setMocking(v => !v)} />
+                Use mock response (server-side)
+              </label>
+              <button type="submit" disabled={!canSubmit} className="btn" aria-busy={phase === "waking" || phase === "submitting"}>
+                {phase === "submitting" ? "Submitting…" : "Check"}
+              </button>
             </div>
-          ))}
+          </form>
 
-          <div className="flex items-center justify-between gap-3">
-            <label className="inline-flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={mocking} onChange={() => setMocking(v => !v)} />
-              Use mock response (server-side)
-            </label>
+          {(phase === "waking" || phase === "submitting") && (
+            <div className="mt-6 flex items-center gap-3">
+              <span className="spinner" />
+              <p className="text-sm">
+                {phase === "waking" ? <>Waking up server… <span className="tabular-nums">{seconds}s</span></> : "Submitting…"}
+              </p>
+            </div>
+          )}
 
-            <button
-              type="submit"
-              disabled={!canSubmit}
-              className={`px-4 py-2 rounded-lg text-white ${canSubmit ? "bg-black hover:bg-black/90" : "bg-gray-400 cursor-not-allowed"}`}
-              aria-busy={phase === "waking" || phase === "submitting"}
-            >
-              {phase === "submitting" ? "Submitting…" : "Check"}
-            </button>
-          </div>
-        </form>
+          {phase === "error" && (
+            <div className="mt-6 p-3 rounded-lg bg-red-50 text-red-700 text-sm break-words">
+              <strong>Error:</strong> {errMsg}
+            </div>
+          )}
 
-        {(phase === "waking" || phase === "submitting") && (
-          <div className="mt-6 flex items-center gap-3">
-            <Spinner />
-            <p className="text-sm">
-              {phase === "waking" ? <>Waking up server… <span className="tabular-nums">{seconds}s</span></> : "Submitting…"}
-            </p>
-          </div>
-        )}
+          {phase === "done" && result && (
+            <div className="mt-6">
+              <h2 className="text-lg font-semibold mb-2">Result</h2>
+              <ResultCard data={result} />
+            </div>
+          )}
 
-        {phase === "error" && (
-          <div className="mt-6 p-3 rounded-lg bg-red-50 text-red-700 text-sm break-words">
-            <strong>Error:</strong> {errMsg}
-          </div>
-        )}
-
-        {phase === "done" && result && (
-          <div className="mt-6">
-            <h2 className="text-lg font-semibold mb-2">Result</h2>
-            <ResultCard data={result} />
-          </div>
-        )}
-
-        {/* Footer with API + Model */}
-        <div className="mt-8 text-xs text-gray-500 space-y-1">
-          <div>API: <code className="bg-gray-100 px-1 py-0.5 rounded">{API_BASE}</code></div>
-          <div>Model: <code className="bg-gray-100 px-1 py-0.5 rounded">{serverModel || "unknown"}</code></div>
-        </div>
+          <footer className="mt-8 text-xs text-gray-500 space-y-1">
+            <div>API: <code className="code">{API_BASE}</code></div>
+            <div>Model: <code className="code">{serverModel || "unknown"}</code></div>
+          </footer>
+        </main>
       </div>
     </div>
-  );
-}
-
-function Spinner() {
-  return (
-    <div
-      aria-label="Loading"
-      role="status"
-      className="inline-block w-5 h-5 border-2 border-gray-300 border-t-black rounded-full animate-spin"
-      style={{ borderRightColor: "transparent", borderBottomColor: "transparent" }}
-    />
   );
 }
 
@@ -219,7 +187,7 @@ function ResultCard({ data }) {
 
       {modelFromBody && (
         <div className="mt-2 text-xs text-gray-600">
-          Model: <code className="bg-gray-100 px-1 py-0.5 rounded">{modelFromBody}</code>
+          Model: <code className="code">{modelFromBody}</code>
         </div>
       )}
 

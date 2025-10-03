@@ -1,3 +1,4 @@
+
 // server/index.js
 import dotenv from "dotenv";
 dotenv.config();
@@ -10,16 +11,15 @@ import { z } from "zod";
 
 const app = express();
 
-// Trust Render proxy
-app.set("trust proxy", true);
-
-// --- ENV ---
+// ----- ENV -----
 const BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
 const MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-4-maverick:free";
 const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || "https://english-native-check.vercel.app";
 const DEBUG_SECRET = process.env.DEBUG_SECRET || "";
 
-// --- CORS ---
+// ----- CORE MIDDLEWARE -----
+app.set("trust proxy", true);
+
 const corsOrigins = (process.env.CORS_ALLOW_ORIGIN || "")
   .split(",")
   .map((s) => s.trim())
@@ -28,23 +28,20 @@ const corsOrigins = (process.env.CORS_ALLOW_ORIGIN || "")
 app.use(
   cors({
     origin: corsOrigins.length ? corsOrigins : "*",
-    // Expose the x-model header so frontend JS can read it
-    exposedHeaders: ["x-model"],
+    exposedHeaders: ["x-model"], // let browser JS read this header
   })
 );
 
-// Global JSON
 app.use(express.json({ limit: "1mb" }));
 
-// --- Response header middleware to expose the model everywhere ---
-app.use((req, res, next) => {
+// Stamp model on every response (handy for the UI)
+app.use((_, res, next) => {
   res.setHeader("x-model", MODEL);
-  // make sure browser JS can read custom headers (in case some proxies strip cors options)
   res.setHeader("Access-Control-Expose-Headers", "x-model");
   next();
 });
 
-// --- Rate limit only the heavy route ---
+// Limit only the heavy route
 const limiter = rateLimit({
   windowMs: 60_000,
   max: 20,
@@ -54,7 +51,7 @@ const limiter = rateLimit({
 });
 app.use("/assess", limiter);
 
-// --- OpenRouter client ---
+// ----- OPENROUTER CLIENT -----
 const client = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
   baseURL: BASE_URL,
@@ -64,7 +61,7 @@ const client = new OpenAI({
   },
 });
 
-// --- Prompts ---
+// ----- PROMPTS -----
 const SYSTEM_PROMPT = "You are a calibrated linguistics examiner. Output STRICT JSON only.";
 const STRICT_JSON_INSTR = `
 You are evaluating a four-part English proficiency test. Return ONLY one JSON object with this schema:
@@ -82,12 +79,12 @@ Guidelines:
 - "suggestions": 3–5 actionable tips.
 `;
 
-// --- Health + Meta ---
+// ----- HEALTH + META -----
 app.get("/", (_req, res) => res.send("OK"));
 app.head("/", (_req, res) => res.status(204).end());
 app.get("/meta", (_req, res) => res.json({ model: MODEL, baseURL: BASE_URL }));
 
-// --- Schemas & helpers ---
+// ----- HELPERS -----
 const AnswersSchema = z.object({
   answers: z.array(z.string().min(1, "answer cannot be empty")).length(4, "need exactly 4 answers"),
 });
@@ -96,7 +93,7 @@ function extractJson(raw) {
   if (!raw || typeof raw !== "string") throw new Error("Empty response");
   let s = raw.trim();
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence && fence[1]) s = fence[1].trim();
+  if (fence?.[1]) s = fence[1].trim();
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
   if (first !== -1 && last !== -1 && last > first) s = s.slice(first, last + 1);
@@ -110,13 +107,14 @@ function normalizeResult(out) {
     score: Math.max(0, Math.min(10, scoreNum)),
     level: obj?.level || "Intermediate",
     reasons: obj?.reasons || "Results normalized.",
-    suggestions: Array.isArray(obj?.suggestions) && obj.suggestions.length
-      ? obj.suggestions
-      : [
-          "Practice collocations and article usage.",
-          "Review conditionals (3rd).",
-          "Reinforce gerund/infinitive patterns.",
-        ],
+    suggestions:
+      Array.isArray(obj?.suggestions) && obj.suggestions.length
+        ? obj.suggestions
+        : [
+            "Practice collocations and article usage.",
+            "Review conditionals (3rd).",
+            "Reinforce gerund/infinitive patterns.",
+          ],
   };
 }
 
@@ -134,7 +132,7 @@ async function askOnce({ system, user, max_tokens = 600 }) {
   return r.choices?.[0]?.message?.content ?? "";
 }
 
-// --- Main route ---
+// ----- MAIN ROUTE -----
 app.post("/assess", async (req, res) => {
   const debug = req.query.debug === "1" && req.query.secret === DEBUG_SECRET;
 
@@ -146,7 +144,7 @@ app.post("/assess", async (req, res) => {
         .json({ error: "Bad input", detail: parsed.error.issues, _meta: { model: MODEL } });
     }
 
-    // Mock path
+    // Mock
     if (req.query.mock === "1") {
       return res.json({
         score: 7,
@@ -206,7 +204,7 @@ app.post("/assess", async (req, res) => {
   }
 });
 
-// --- Start ---
+// ----- START -----
 const port = process.env.PORT || 8787;
 app.listen(port, () => {
   console.log(`API running on port ${port}`);
