@@ -10,19 +10,41 @@ import { z } from "zod";
 
 const app = express();
 
-// Render proxy trust (rate limit + req.ip)
+// Trust Render proxy
 app.set("trust proxy", true);
 
-// CORS allowlist from env
+// --- ENV ---
+const BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
+const MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-4-maverick:free";
+const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || "https://english-native-check.vercel.app";
+const DEBUG_SECRET = process.env.DEBUG_SECRET || "";
+
+// --- CORS ---
 const corsOrigins = (process.env.CORS_ALLOW_ORIGIN || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-app.use(cors({ origin: corsOrigins.length ? corsOrigins : "*" }));
 
+app.use(
+  cors({
+    origin: corsOrigins.length ? corsOrigins : "*",
+    // Expose the x-model header so frontend JS can read it
+    exposedHeaders: ["x-model"],
+  })
+);
+
+// Global JSON
 app.use(express.json({ limit: "1mb" }));
 
-// Rate limit only the heavy route
+// --- Response header middleware to expose the model everywhere ---
+app.use((req, res, next) => {
+  res.setHeader("x-model", MODEL);
+  // make sure browser JS can read custom headers (in case some proxies strip cors options)
+  res.setHeader("Access-Control-Expose-Headers", "x-model");
+  next();
+});
+
+// --- Rate limit only the heavy route ---
 const limiter = rateLimit({
   windowMs: 60_000,
   max: 20,
@@ -32,17 +54,7 @@ const limiter = rateLimit({
 });
 app.use("/assess", limiter);
 
-// Input schema
-const AnswersSchema = z.object({
-  answers: z.array(z.string().min(1, "answer cannot be empty")).length(4, "need exactly 4 answers"),
-});
-
-// Env
-const BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
-const MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-4-maverick:free";
-const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || "https://english-native-check.vercel.app";
-const DEBUG_SECRET = process.env.DEBUG_SECRET || "";
-
+// --- OpenRouter client ---
 const client = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
   baseURL: BASE_URL,
@@ -52,7 +64,7 @@ const client = new OpenAI({
   },
 });
 
-// Prompts
+// --- Prompts ---
 const SYSTEM_PROMPT = "You are a calibrated linguistics examiner. Output STRICT JSON only.";
 const STRICT_JSON_INSTR = `
 You are evaluating a four-part English proficiency test. Return ONLY one JSON object with this schema:
@@ -70,12 +82,16 @@ Guidelines:
 - "suggestions": 3–5 actionable tips.
 `;
 
-// --- Health + Meta (used by frontend to wake + show model) ---
+// --- Health + Meta ---
 app.get("/", (_req, res) => res.send("OK"));
 app.head("/", (_req, res) => res.status(204).end());
 app.get("/meta", (_req, res) => res.json({ model: MODEL, baseURL: BASE_URL }));
 
-// Helpers
+// --- Schemas & helpers ---
+const AnswersSchema = z.object({
+  answers: z.array(z.string().min(1, "answer cannot be empty")).length(4, "need exactly 4 answers"),
+});
+
 function extractJson(raw) {
   if (!raw || typeof raw !== "string") throw new Error("Empty response");
   let s = raw.trim();
@@ -118,17 +134,19 @@ async function askOnce({ system, user, max_tokens = 600 }) {
   return r.choices?.[0]?.message?.content ?? "";
 }
 
-// --- Main assess route ---
+// --- Main route ---
 app.post("/assess", async (req, res) => {
   const debug = req.query.debug === "1" && req.query.secret === DEBUG_SECRET;
 
   try {
     const parsed = AnswersSchema.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({ error: "Bad input", detail: parsed.error.issues });
+      return res
+        .status(400)
+        .json({ error: "Bad input", detail: parsed.error.issues, _meta: { model: MODEL } });
     }
 
-    // Mock mode (unchanged)
+    // Mock path
     if (req.query.mock === "1") {
       return res.json({
         score: 7,
@@ -139,7 +157,7 @@ app.post("/assess", async (req, res) => {
           "Practice gerund vs infinitive.",
           "Reinforce 3rd conditional.",
         ],
-        _meta: { model: MODEL }, // expose model (non-breaking)
+        _meta: { model: MODEL },
       });
     }
 
@@ -161,7 +179,7 @@ app.post("/assess", async (req, res) => {
     try {
       out = extractJson(raw1);
     } catch {
-      // Attempt 2 fallback
+      // Attempt 2
       let raw2 = await askOnce({
         system: "Output STRICT JSON only. No preamble.",
         user: `Schema: {"score":number,"level":"Beginner"|"Intermediate"|"Advanced"|"Near-native"|"Native-like","reasons":string,"suggestions":string[]}\n\nEvaluate:\n${userText}`,
@@ -172,6 +190,7 @@ app.post("/assess", async (req, res) => {
           error: "Parse failed twice",
           raw1: String(raw1).slice(0, 600),
           raw2: String(raw2).slice(0, 600),
+          _meta: { model: MODEL },
         });
       }
 
@@ -187,7 +206,7 @@ app.post("/assess", async (req, res) => {
   }
 });
 
-// --- Start server ---
+// --- Start ---
 const port = process.env.PORT || 8787;
 app.listen(port, () => {
   console.log(`API running on port ${port}`);
