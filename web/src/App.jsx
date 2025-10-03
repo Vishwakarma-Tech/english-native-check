@@ -1,92 +1,243 @@
-import { useState } from 'react';
-import ky from 'ky';
+// web/src/App.jsx
+import { useEffect, useMemo, useRef, useState } from "react";
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8787';
+const API_BASE = import.meta.env.VITE_API_URL || "https://english-native-check.onrender.com";
 
-const QUESTIONS = [
-  "Part 1: Short Writing Test\nWrite 3–4 sentences answering this:\n“If you suddenly had a free week with no responsibilities, how would you spend it?”",
+// fetch with timeout
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: ac.signal, cache: "no-store" });
+    return res;
+  } finally {
+    clearTimeout(t);
+  }
+}
 
-  "Part 2: Idioms & Expressions\nTell me what this idiom means in your own words:\n“That project was a blessing in disguise.”",
-
-  "Part 3: Word Choice\nChoose the option that sounds most natural:\n- Let’s meet in the evening / on the evening.\n- She suggested to go / going for a walk.\n- I’m looking forward to meet / to meeting you.",
-
-  "Part 4: Subtle Grammar\nFill in the blank:\n“If I ___ known about the traffic, I would have left earlier.”"
-];
-
+// wake server
+async function wakeServer({ healthUrl, maxAttempts = 6, startBackoffMs = 500, timeoutMs = 12000 }) {
+  let backoff = startBackoffMs;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const r = await fetchWithTimeout(healthUrl, { method: "HEAD", mode: "cors" }, timeoutMs);
+      if (r.ok || (r.status >= 200 && r.status < 400)) return;
+      const r2 = await fetchWithTimeout(healthUrl, { method: "GET", mode: "cors" }, timeoutMs);
+      if (r2.ok || (r2.status >= 200 && r2.status < 400)) return;
+    } catch {}
+    await new Promise((res) => setTimeout(res, backoff));
+    backoff = Math.min(backoff * 2, 7000);
+  }
+  throw new Error("Server did not wake in time");
+}
 
 export default function App() {
-  const [answers, setAnswers] = useState(["","","",""]);
-  const [loading, setLoading] = useState(false);
+  const [answers, setAnswers] = useState(["", "", "", ""]);
+  const [phase, setPhase] = useState("idle"); // idle | prewarming | waking | submitting | done | error
+  const [seconds, setSeconds] = useState(0);
   const [result, setResult] = useState(null);
-  const [error, setError] = useState("");
+  const [errMsg, setErrMsg] = useState("");
+  const [mocking, setMocking] = useState(false);
+  const [serverModel, setServerModel] = useState("");
 
-  const update = (i, v) => {
-    const next = answers.slice();
-    next[i] = v;
-    setAnswers(next);
-  };
+  const tickerRef = useRef(null);
+  function startTicker(){ stopTicker(); setSeconds(0); tickerRef.current=setInterval(()=>setSeconds(s=>s+1),1000); }
+  function stopTicker(){ if (tickerRef.current){ clearInterval(tickerRef.current); tickerRef.current=null; } }
 
-  const submit = async (e) => {
+  // prewarm + read /meta
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        setPhase("prewarming");
+        // Try to read /meta (may fail if cold; that's okay)
+        try {
+          const m = await fetchWithTimeout(`${API_BASE}/meta`, { method: "GET", mode: "cors" }, 8000);
+          if (m?.ok) {
+            const j = await m.json();
+            if (mounted && j?.model) setServerModel(j.model);
+          }
+        } catch {}
+        // Light prewarm
+        await wakeServer({ healthUrl: `${API_BASE}/`, maxAttempts: 3, startBackoffMs: 300, timeoutMs: 8000 });
+      } catch {} finally {
+        if (mounted) setPhase("idle");
+      }
+    })();
+    return () => { mounted = false; stopTicker(); };
+  }, []);
+
+  const canSubmit = useMemo(
+    () => answers.every(a => a.trim().length > 0) && phase !== "waking" && phase !== "submitting",
+    [answers, phase]
+  );
+
+  async function handleSubmit(e) {
     e.preventDefault();
-    setLoading(true); setError(""); setResult(null);
+    setErrMsg(""); setResult(null);
+
     try {
-      const data = await ky.post(`${API_URL}/assess`, { json: { answers } }).json();
+      // 1) wake
+      setPhase("waking"); startTicker();
+      await wakeServer({ healthUrl: `${API_BASE}/` });
+
+      // 2) submit
+      setPhase("submitting");
+      const res = await fetchWithTimeout(
+        `${API_BASE}/assess${mocking ? "?mock=1" : ""}`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answers }), mode: "cors" },
+        30000
+      );
+
+      // read header fallback
+      const headerModel = res.headers?.get("x-model");
+      if (headerModel && !serverModel) setServerModel(headerModel);
+
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`API ${res.status}: ${text}`);
+      }
+      const data = await res.json();
+
+      // prefer body meta
+      const bodyModel = data?._meta?.model;
+      if (bodyModel) setServerModel(bodyModel);
+      else if (headerModel && !serverModel) setServerModel(headerModel);
+
       setResult(data);
-    } catch {
-      setError("Assessment failed. Check API URL or CORS.");
+      setPhase("done");
+    } catch (err) {
+      setErrMsg(err?.message || "Submission failed");
+      setPhase("error");
     } finally {
-      setLoading(false);
+      stopTicker();
     }
-  };
+  }
 
   return (
-    <div style={{maxWidth:760, margin:"2rem auto", fontFamily:"system-ui, sans-serif"}}>
-      <h1>Native-like English Check</h1>
-	<p style={{ fontSize: "0.9rem", color: "#666", marginTop: "-0.5rem" }}>			
-           Created by Vik Gadgil – AI Lab Project – using OpenRouter LLM broker
-	</p>
-      <p>Answer four prompts. We’ll score native-likeness (0–10) and suggest improvements.</p>
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6">
+      <div className="w-full max-w-3xl bg-white shadow-lg rounded-2xl p-6">
+        <h1 className="text-2xl font-semibold mb-1">English Native Check</h1>
+        <p className="text-sm text-gray-600 mb-6">
+          First run on the free tier may take a few seconds while the server wakes up.
+        </p>
 
-      <form onSubmit={submit}>
-        {QUESTIONS.map((q,i)=>(
-          <div key={i} style={{margin:"1rem 0"}}>
-            <label><strong>{q}</strong></label>
-            <textarea
-              rows={5}
-              required
-              style={{width:"100%", padding:"0.75rem"}}
-              value={answers[i]}
-              onChange={e=>update(i, e.target.value)}
-            />
+        <form onSubmit={handleSubmit} className="space-y-4">
+          {[
+            "Part 1 — short paragraph (3–4 sentences)",
+            "Part 2 — explain the idiom 'blessing in disguise'",
+            "Part 3 — choose the natural options (e.g., 'in the evening; suggested going; looking forward to meeting')",
+            "Part 4 — fill: If I ___ known, I would have…",
+          ].map((label, i) => (
+            <div key={i}>
+              <label className="block text-sm font-medium mb-1">{label}</label>
+              <textarea
+                value={answers[i]}
+                onChange={(e) => { const copy = answers.slice(); copy[i] = e.target.value; setAnswers(copy); }}
+                className="w-full border rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-black/60"
+                rows={i === 0 ? 4 : 3}
+                placeholder={`Type your answer for ${label.toLowerCase()}`}
+              />
+            </div>
+          ))}
+
+          <div className="flex items-center justify-between gap-3">
+            <label className="inline-flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={mocking} onChange={() => setMocking(v => !v)} />
+              Use mock response (server-side)
+            </label>
+
+            <button
+              type="submit"
+              disabled={!canSubmit}
+              className={`px-4 py-2 rounded-lg text-white ${canSubmit ? "bg-black hover:bg-black/90" : "bg-gray-400 cursor-not-allowed"}`}
+              aria-busy={phase === "waking" || phase === "submitting"}
+            >
+              {phase === "submitting" ? "Submitting…" : "Check"}
+            </button>
           </div>
-        ))}
-       <button
-  disabled={loading}
-  style={{
-    padding: "0.6rem 1rem",
-    backgroundColor: loading ? "#666" : "#333",  // dark gray/black
-    color: "white",
-    border: "none",
-    borderRadius: "4px",
-    cursor: loading ? "not-allowed" : "pointer"
-  }}
->
-  {loading ? "Scoring..." : "Get Score"}
-</button>
-      </form>
+        </form>
 
-      {error && <p style={{color:"crimson"}}>{error}</p>}
+        {(phase === "waking" || phase === "submitting") && (
+          <div className="mt-6 flex items-center gap-3">
+            <Spinner />
+            <p className="text-sm">
+              {phase === "waking" ? <>Waking up server… <span className="tabular-nums">{seconds}s</span></> : "Submitting…"}
+            </p>
+          </div>
+        )}
 
-      {result && (
-        <div style={{marginTop:"1.5rem", padding:"1rem", border:"1px solid #ddd", borderRadius:8}}>
-          <h2>Result: {result.score}/10 — {result.level}</h2>
-          <p><strong>Why:</strong> {result.reasons}</p>
-          <ol>
-            {result.suggestions.map((s, idx) => <li key={idx}>{s}</li>)}
-          </ol>
+        {phase === "error" && (
+          <div className="mt-6 p-3 rounded-lg bg-red-50 text-red-700 text-sm break-words">
+            <strong>Error:</strong> {errMsg}
+          </div>
+        )}
+
+        {phase === "done" && result && (
+          <div className="mt-6">
+            <h2 className="text-lg font-semibold mb-2">Result</h2>
+            <ResultCard data={result} />
+          </div>
+        )}
+
+        {/* Footer with API + Model */}
+        <div className="mt-8 text-xs text-gray-500 space-y-1">
+          <div>API: <code className="bg-gray-100 px-1 py-0.5 rounded">{API_BASE}</code></div>
+          <div>Model: <code className="bg-gray-100 px-1 py-0.5 rounded">{serverModel || "unknown"}</code></div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
 
+function Spinner() {
+  return (
+    <div
+      aria-label="Loading"
+      role="status"
+      className="inline-block w-5 h-5 border-2 border-gray-300 border-t-black rounded-full animate-spin"
+      style={{ borderRightColor: "transparent", borderBottomColor: "transparent" }}
+    />
+  );
+}
+
+function ResultCard({ data }) {
+  const { score, level, reasons, suggestions, _meta } = data || {};
+  const modelFromBody = _meta?.model;
+  return (
+    <div className="rounded-xl border p-4 bg-gray-50">
+      <div className="flex items-center justify-between">
+        <div>
+          <div className="text-sm text-gray-600">Score</div>
+          <div className="text-2xl font-semibold">{Number.isFinite(score) ? score : "—"}/10</div>
+        </div>
+        <div className="text-right">
+          <div className="text-sm text-gray-600">Level</div>
+          <div className="text-lg font-medium">{level || "—"}</div>
+        </div>
+      </div>
+
+      {modelFromBody && (
+        <div className="mt-2 text-xs text-gray-600">
+          Model: <code className="bg-gray-100 px-1 py-0.5 rounded">{modelFromBody}</code>
+        </div>
+      )}
+
+      <div className="mt-4">
+        <div className="text-sm font-medium">Why</div>
+        <p className="text-sm text-gray-800 whitespace-pre-wrap">{reasons || "—"}</p>
+      </div>
+
+      <div className="mt-4">
+        <div className="text-sm font-medium mb-1">Suggestions</div>
+        {Array.isArray(suggestions) && suggestions.length ? (
+          <ul className="list-disc pl-5 text-sm text-gray-800 space-y-1">
+            {suggestions.map((s, i) => <li key={i}>{s}</li>)}
+          </ul>
+        ) : (
+          <p className="text-sm text-gray-800">—</p>
+        )}
+      </div>
+    </div>
+  );
+}
