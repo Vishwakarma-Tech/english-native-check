@@ -1,10 +1,13 @@
-// index.js — robust API with 4-part rubric, strict JSON, normalization, and mock
-// Requires .env in THIS folder:
+// index.js — robust API with 4-part rubric, OpenRouter headers, compatible params,
+// strict JSON parsing/normalization, mock mode, and helpful logs.
+//
+// .env on Render:
 // OPENROUTER_API_KEY=sk-or-...
 // OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 // OPENROUTER_MODEL=z-ai/glm-4.5-air:free
+// PUBLIC_APP_URL=https://<your-vercel-app>.vercel.app
+// CORS_ALLOW_ORIGIN=https://<your-vercel-app>.vercel.app
 // PORT=8787
-// (optional) CORS_ALLOW_ORIGIN=http://127.0.0.1:5174,https://<your-vercel-app>.vercel.app
 
 import dotenv from 'dotenv';
 dotenv.config();
@@ -31,9 +34,19 @@ const AnswersSchema = z.object({
 // ---------- OpenRouter client ----------
 const BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
 const MODEL = process.env.OPENROUTER_MODEL || 'z-ai/glm-4.5-air:free';
-const client = new OpenAI({ apiKey: process.env.OPENROUTER_API_KEY, baseURL: BASE_URL });
+const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || 'https://english-native-check.vercel.app';
 
-// ---------- Prompts (UPDATED for your 4-part test) ----------
+const client = new OpenAI({
+  apiKey: process.env.OPENROUTER_API_KEY,
+  baseURL: BASE_URL,
+  // These headers help routing/allowance on free tiers
+  defaultHeaders: {
+    'HTTP-Referer': PUBLIC_APP_URL,
+    'X-Title': 'English Native Check'
+  }
+});
+
+// ---------- Prompts (4-part test rubric) ----------
 const SYSTEM_PROMPT = 'You are a calibrated linguistics examiner. Output STRICT JSON only.';
 const STRICT_JSON_INSTR = `
 You are evaluating a four-part English proficiency test. Return ONLY one JSON object with this exact schema and nothing else:
@@ -77,10 +90,8 @@ app.get('/', (_req, res) => res.send('OK'));
 function extractJson(raw) {
   if (!raw || typeof raw !== 'string') throw new Error('Empty response');
   let s = raw.trim();
-  // fenced code block
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence && fence[1]) s = fence[1].trim();
-  // first {...}
   const first = s.indexOf('{');
   const last = s.lastIndexOf('}');
   if (first !== -1 && last !== -1 && last > first) s = s.slice(first, last + 1);
@@ -88,10 +99,10 @@ function extractJson(raw) {
 }
 
 function normalizeResult(out) {
-  const obj = Array.isArray(out) ? out[0] : out;        // pick first if multiple
-  const scoreNum = Math.round(Number(obj?.score ?? 0)); // integerize
+  const obj = Array.isArray(out) ? out[0] : out;
+  const scoreNum = Math.round(Number(obj?.score ?? 0));
   return {
-    score: Math.max(0, Math.min(10, scoreNum)),         // clamp 0..10
+    score: Math.max(0, Math.min(10, scoreNum)),
     level: obj?.level || 'Intermediate',
     reasons: obj?.reasons || 'Results normalized.',
     suggestions: Array.isArray(obj?.suggestions) && obj.suggestions.length
@@ -101,17 +112,16 @@ function normalizeResult(out) {
 }
 
 async function askOnce({ system, user, max_tokens = 700 }) {
+  // NOTE: keep params broadly compatible (some free providers 400 on response_format)
   const r = await client.chat.completions.create({
     model: MODEL,
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user }
     ],
-    temperature: 0.0,
-    top_p: 0.1,
-    max_tokens,
-    // many models honor this; some ignore (we still parse/normalize)
-    response_format: { type: 'json_object' }
+    temperature: 0.0,   // stable outputs
+    top_p: 1.0,         // broad compatibility
+    max_tokens          // conservative cap
   });
   return r.choices?.[0]?.message?.content ?? '';
 }
@@ -121,13 +131,12 @@ app.post('/assess', async (req, res) => {
   try {
     console.log('POST /assess', new Date().toISOString(), 'mock=', req.query.mock);
 
-    // Validate input
     const parsed = AnswersSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: 'Bad input', detail: parsed.error.issues });
     }
 
-    // MOCK MODE — no provider call
+    // Mock path (no provider call)
     if (req.query.mock === '1') {
       return res.json({
         score: 7,
@@ -142,7 +151,6 @@ app.post('/assess', async (req, res) => {
       });
     }
 
-    // Label each part explicitly for the model
     const [a1, a2, a3, a4] = parsed.data.answers;
     const userText = [
       `Part 1 — Candidate answer:\n${a1}`,
@@ -151,7 +159,7 @@ app.post('/assess', async (req, res) => {
       `Part 4 — Candidate answer:\n${a4}`
     ].join('\n\n');
 
-    // Attempt 1: main instruction
+    // Attempt 1
     console.time('llm-call-1');
     const raw1 = await askOnce({
       system: SYSTEM_PROMPT,
@@ -165,7 +173,7 @@ app.post('/assess', async (req, res) => {
     } catch (e1) {
       console.warn('Parse failed once. First 200 chars of raw1:', String(raw1).slice(0, 200));
 
-      // Attempt 2: even stricter instruction
+      // Attempt 2: stricter wording
       console.time('llm-call-2');
       const raw2 = await askOnce({
         system: 'Output STRICT JSON only. No preamble, no extra text, no markdown.',
@@ -181,7 +189,6 @@ app.post('/assess', async (req, res) => {
       }
     }
 
-    // Normalize + validate final shape
     const normalized = normalizeResult(out);
     const ResultSchema = z.object({
       score: z.number().int().min(0).max(10),
@@ -216,5 +223,6 @@ app.listen(port, () => {
   console.log(`API running at http://localhost:${port}`);
   console.log(`Model: ${MODEL}`);
   console.log(`Base URL: ${BASE_URL}`);
+  console.log(`Public app URL: ${PUBLIC_APP_URL}`);
   console.log(`CORS allow: ${Array.isArray(corsOrigins) ? corsOrigins.join(', ') : corsOrigins}`);
 });
