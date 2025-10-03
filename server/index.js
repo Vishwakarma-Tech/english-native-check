@@ -1,15 +1,4 @@
 // server/index.js
-//
-// Node.js Express API for English-Native-Check
-// Features:
-// - Health check endpoint (for wake-up pings)
-// - /assess with mock + debug mode
-// - Trust proxy (Render requirement)
-// - CORS setup
-// - Rate limiting
-// - LLM call (OpenRouter via openai client)
-// - Strict JSON parsing / normalization
-
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -21,7 +10,7 @@ import { z } from "zod";
 
 const app = express();
 
-// Trust Render proxy so req.ip works with rate limiting
+// Render proxy trust (rate limit + req.ip)
 app.set("trust proxy", true);
 
 // CORS allowlist from env
@@ -31,7 +20,6 @@ const corsOrigins = (process.env.CORS_ALLOW_ORIGIN || "")
   .filter(Boolean);
 app.use(cors({ origin: corsOrigins.length ? corsOrigins : "*" }));
 
-// JSON parsing
 app.use(express.json({ limit: "1mb" }));
 
 // Rate limit only the heavy route
@@ -44,18 +32,15 @@ const limiter = rateLimit({
 });
 app.use("/assess", limiter);
 
-// Schema for input
+// Input schema
 const AnswersSchema = z.object({
-  answers: z
-    .array(z.string().min(1, "answer cannot be empty"))
-    .length(4, "need exactly 4 answers"),
+  answers: z.array(z.string().min(1, "answer cannot be empty")).length(4, "need exactly 4 answers"),
 });
 
 // Env
 const BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
 const MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-4-maverick:free";
-const PUBLIC_APP_URL =
-  process.env.PUBLIC_APP_URL || "https://english-native-check.vercel.app";
+const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || "https://english-native-check.vercel.app";
 const DEBUG_SECRET = process.env.DEBUG_SECRET || "";
 
 const client = new OpenAI({
@@ -85,9 +70,10 @@ Guidelines:
 - "suggestions": 3–5 actionable tips.
 `;
 
-// --- Health check (used by frontend to wake server) ---
+// --- Health + Meta (used by frontend to wake + show model) ---
 app.get("/", (_req, res) => res.send("OK"));
 app.head("/", (_req, res) => res.status(204).end());
+app.get("/meta", (_req, res) => res.json({ model: MODEL, baseURL: BASE_URL }));
 
 // Helpers
 function extractJson(raw) {
@@ -108,14 +94,13 @@ function normalizeResult(out) {
     score: Math.max(0, Math.min(10, scoreNum)),
     level: obj?.level || "Intermediate",
     reasons: obj?.reasons || "Results normalized.",
-    suggestions:
-      Array.isArray(obj?.suggestions) && obj.suggestions.length
-        ? obj.suggestions
-        : [
-            "Practice collocations and article usage.",
-            "Review conditionals (3rd).",
-            "Reinforce gerund/infinitive patterns.",
-          ],
+    suggestions: Array.isArray(obj?.suggestions) && obj.suggestions.length
+      ? obj.suggestions
+      : [
+          "Practice collocations and article usage.",
+          "Review conditionals (3rd).",
+          "Reinforce gerund/infinitive patterns.",
+        ],
   };
 }
 
@@ -143,7 +128,7 @@ app.post("/assess", async (req, res) => {
       return res.status(400).json({ error: "Bad input", detail: parsed.error.issues });
     }
 
-    // Mock mode
+    // Mock mode (unchanged)
     if (req.query.mock === "1") {
       return res.json({
         score: 7,
@@ -154,6 +139,7 @@ app.post("/assess", async (req, res) => {
           "Practice gerund vs infinitive.",
           "Reinforce 3rd conditional.",
         ],
+        _meta: { model: MODEL }, // expose model (non-breaking)
       });
     }
 
@@ -193,11 +179,11 @@ app.post("/assess", async (req, res) => {
     }
 
     const normalized = normalizeResult(out);
-    return res.json(normalized);
+    return res.json({ ...normalized, _meta: { model: MODEL } });
   } catch (e) {
     const status = e?.status || e?.response?.status || 500;
     const detail = e?.message || "Unknown error";
-    return res.status(status).json({ error: "Assessment failed", detail });
+    return res.status(status).json({ error: "Assessment failed", detail, _meta: { model: MODEL } });
   }
 });
 
@@ -208,7 +194,5 @@ app.listen(port, () => {
   console.log(`Model: ${MODEL}`);
   console.log(`Base URL: ${BASE_URL}`);
   console.log(`Public app URL: ${PUBLIC_APP_URL}`);
-  console.log(
-    `CORS allow: ${corsOrigins.length ? corsOrigins.join(", ") : "*"}`
-  );
+  console.log(`CORS allow: ${corsOrigins.length ? corsOrigins.join(", ") : "*"}`);
 });
