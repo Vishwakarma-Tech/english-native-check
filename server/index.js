@@ -60,7 +60,7 @@ const client = new OpenAI({
   },
 });
 
-// ----- PROMPTS (updated to your new wording) -----
+// ----- PROMPTS (explicit Part 4 sentence with two blanks) -----
 const SYSTEM_PROMPT = "You are a calibrated linguistics examiner. Output STRICT JSON only.";
 const STRICT_JSON_INSTR = `
 You are evaluating a four-part English proficiency task. Return ONLY one JSON object with this schema:
@@ -76,7 +76,10 @@ Task prompts (what the candidate saw):
 - Part 1 — "Write a short paragraph." (Assess coherence, grammar, vocabulary, collocations, flow; penalize robotic text.)
 - Part 2 — "Explain the idiom 'blessing in disguise'." (Meaning: something initially negative/hidden that leads to a positive outcome.)
 - Part 3 — "Use these fragments in a sentence: 'in the evening; suggested going; looking forward to meeting'." (Assess natural integration and grammar.)
-- Part 4 — "Fill in two blanks and reproduce the complete sentence." (Target form: third conditional — e.g., 'If I had ___ known, I would have ___.' Then present the full corrected sentence.)
+- Part 4 — "Fill in two blanks and reproduce the complete sentence: If I ___ known, I would have ___." 
+  Target form: third conditional — correct completion should be:
+  Blanks → "had" and a past participle (e.g., "had known") / "would have" + past participle (e.g., "would have told").
+  Require the candidate to also write the full corrected sentence.
 
 Weights (round overall to nearest integer):
 - Part 1 Writing 40%
@@ -175,7 +178,7 @@ app.post("/assess", async (req, res) => {
       `Part 1 — Candidate answer:\n${a1}`,
       `Part 2 — Candidate answer:\n${a2}`,
       `Part 3 — Candidate answer:\n${a3}`,
-      `Part 4 — Candidate answer:\n${a4}`,
+      `Part 4 — Candidate answer (prompt was: "If I ___ known, I would have ___."): \n${a4}`,
     ].join("\n\n");
 
     // Attempt 1
