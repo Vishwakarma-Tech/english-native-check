@@ -11,9 +11,11 @@ app.set("trust proxy", true);
 
 /* ---- ENV ---- */
 const BASE_URL = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
-const MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct:free";
+const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct:free";
 const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || "https://english-native-check.vercel.app";
 const DEBUG_SECRET = process.env.DEBUG_SECRET || "";
+// Comma-separated list of fallbacks (in order)
+const FALLBACK_MODELS = (process.env.FALLBACK_MODELS || "qwen/qwen3-8b-instruct:free").split(",").map(s => s.trim()).filter(Boolean);
 
 /* ---- CORS ---- */
 const corsOrigins = (process.env.CORS_ALLOW_ORIGIN || "")
@@ -28,8 +30,9 @@ app.use(
   })
 );
 app.use(express.json({ limit: "1mb" }));
-app.use((_, res, next) => {
-  res.setHeader("x-model", MODEL);
+app.use((req, res, next) => {
+  // reveal which model we’ll try first (actual used model is in body _meta)
+  res.setHeader("x-model", DEFAULT_MODEL);
   res.setHeader("Access-Control-Expose-Headers", "x-model");
   next();
 });
@@ -45,13 +48,7 @@ const client = new OpenAI({
   },
 });
 
-/* ---- PROMPTS ----
-   Goals:
-   - FORCE strict JSON
-   - Reduce generic suggestions
-   - Calibrated rubric
-   - Keep temperature=0 and ask for json_object when supported
-*/
+/* ---- PROMPTS (tight JSON discipline) ---- */
 const SYSTEM_PROMPT = [
   "You are a calibrated linguistics examiner.",
   "Return EXACTLY ONE JSON object. No markdown fences. No commentary before or after.",
@@ -72,7 +69,7 @@ Tasks that the user answered (the answers follow AFTER this spec):
 1) Part 1 — "Write a short paragraph."
 2) Part 2 — "Explain the idiom 'blessing in disguise'."
 3) Part 3 — "Use these fragments in a sentence: 'in the evening; suggested going; looking forward to meeting'."
-4) Part 4 — "Fill in two blanks and reproduce the complete sentence: If I ___ known, I would have ___."  (Expect: "had known" and a correct perfect conditional.)
+4) Part 4 — "Fill in two blanks and reproduce the complete sentence: If I ___ known, I would have ___." (Expect: "had known" and a correct perfect conditional.)
 
 Weights: Part1 40%, Part2 20%, Part3 20%, Part4 20%.
 
@@ -86,30 +83,25 @@ Scoring rubric (anchor):
 
 Important output rules:
 - Output ONLY the JSON object, no extra text.
-- reasons: MUST reference concrete issues actually present (e.g., verb tense error in Part 4, vague idiom explanation in Part 2, unnatural collocation in Part 3). Do not use generic phrases like "practice more".
-- suggestions: MUST be specific and actionable (e.g., "Practice third conditional with 'had + past participle' in the if-clause; 'would have + past participle' in the result-clause"). Avoid duplicates and vague advice.
+- reasons: MUST reference concrete issues present (e.g., tense error in Part 4, vague idiom explanation in Part 2, unnatural collocation in Part 3). Avoid generic phrases like "practice more".
+- suggestions: MUST be specific and actionable (e.g., "Practice third conditional: 'If I had known, I would have ...'"). Avoid duplicates and vague advice.
 - Keep wording tight and non-repetitive.
 `;
 
-/* ---- Input validation ---- */
+/* ---- Validation ---- */
 const AnswersSchema = z.object({
   answers: z.array(z.string().min(1)).length(4),
 });
 
-/* ---- Parsing helpers ---- */
+/* ---- Helpers ---- */
 function extractJson(raw) {
   if (!raw || typeof raw !== "string") throw new Error("Empty response");
   let s = raw.trim();
-
-  // strip code fences if present
   const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence?.[1]) s = fence[1].trim();
-
-  // slice outermost JSON object if there is extra text
   const first = s.indexOf("{");
   const last = s.lastIndexOf("}");
   if (first !== -1 && last !== -1 && last > first) s = s.slice(first, last + 1);
-
   return JSON.parse(s);
 }
 
@@ -130,7 +122,7 @@ function normalizeResult(out) {
     .map((s) => (typeof s === "string" ? s.trim() : ""))
     .filter((s) => s.length > 0);
 
-  // Remove near-duplicates & very generic lines
+  // De-dup and filter generic lines
   const deDuped = [];
   const seen = new Set();
   for (const s of cleaned) {
@@ -143,7 +135,7 @@ function normalizeResult(out) {
 
   return {
     score: scoreNum,
-    level: deriveLevel(scoreNum), // <-- FORCE consistency
+    level: deriveLevel(scoreNum),
     reasons: (obj?.reasons && String(obj.reasons).trim()) || "Results normalized.",
     suggestions: deDuped.length ? deDuped : [
       "Vary sentence openings and use cohesive devices (e.g., moreover, however).",
@@ -154,27 +146,66 @@ function normalizeResult(out) {
   };
 }
 
-async function askOnce({ system, user }) {
-  const r = await client.chat.completions.create({
-    model: MODEL,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user }
-    ],
-    temperature: 0,
-    max_tokens: 700,
-    // Many OpenRouter routes honor json_object; harmless if ignored
-    response_format: { type: "json_object" }
-  });
-  return r.choices?.[0]?.message?.content ?? "";
+async function callOnce({ model, system, user, useJsonFormat = true, maxTokens = 700 }) {
+  // First try (optionally with response_format)
+  try {
+    const r = await client.chat.completions.create({
+      model,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user }
+      ],
+      temperature: 0,
+      max_tokens: maxTokens,
+      ...(useJsonFormat ? { response_format: { type: "json_object" } } : {})
+    });
+    return r.choices?.[0]?.message?.content ?? "";
+  } catch (e) {
+    // Bubble up error so the caller can decide retry/fallback behavior
+    throw e;
+  }
+}
+
+async function robustAsk({ preferredModel, userText }) {
+  const modelsToTry = [preferredModel, ...FALLBACK_MODELS];
+  const system = SYSTEM_PROMPT;
+  const user = STRICT_JSON_INSTR + "\n\nUser responses:\n" + userText;
+
+  let lastError;
+  for (const m of modelsToTry) {
+    // 1) Try with json_object
+    try {
+      const raw = await callOnce({ model: m, system, user, useJsonFormat: true, maxTokens: 700 });
+      return { raw, usedModel: m };
+    } catch (e1) {
+      lastError = e1;
+      // 2) Retry same model WITHOUT response_format and with smaller max_tokens
+      try {
+        const raw = await callOnce({ model: m, system, user, useJsonFormat: false, maxTokens: 550 });
+        return { raw, usedModel: m };
+      } catch (e2) {
+        lastError = e2;
+        // continue to next model
+      }
+    }
+  }
+  throw lastError || new Error("All model attempts failed");
 }
 
 /* ---- Routes ---- */
 app.get("/", (_req, res) => res.send("OK"));
-app.get("/meta", (_req, res) => res.json({ model: MODEL, baseURL: BASE_URL }));
+app.get("/meta", (req, res) => {
+  // Optional model override for quick A/B (only with DEBUG_SECRET)
+  const overrideAllowed = req.query.secret === DEBUG_SECRET && typeof req.query.model === "string";
+  const model = overrideAllowed ? req.query.model : DEFAULT_MODEL;
+  res.json({ model, baseURL: BASE_URL, fallback: FALLBACK_MODELS });
+});
 
 app.post("/assess", async (req, res) => {
   const debug = req.query.debug === "1" && req.query.secret === DEBUG_SECRET;
+  // Optional MODEL override (debug only)
+  const modelOverride = req.query.model && req.query.secret === DEBUG_SECRET ? String(req.query.model) : null;
+
   try {
     const parsed = AnswersSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Bad input" });
@@ -185,7 +216,7 @@ app.post("/assess", async (req, res) => {
         level: "Advanced",
         reasons: "Strong grammar; idiom accurate; fragments natural; minor stylistic issues.",
         suggestions: ["Vary transitions.", "Tighten phrasing.", "Use richer connectors."],
-        _meta: { model: MODEL }
+        _meta: { model: modelOverride || DEFAULT_MODEL }
       });
     }
 
@@ -196,25 +227,27 @@ app.post("/assess", async (req, res) => {
       `Part 3:\n${a3}\n\n` +
       `Part 4:\n${a4}`;
 
-    let raw1 = await askOnce({ system: SYSTEM_PROMPT, user: STRICT_JSON_INSTR + "\n\nUser responses:\n" + userText });
+    const { raw, usedModel } = await robustAsk({ preferredModel: modelOverride || DEFAULT_MODEL, userText });
     let out;
     try {
-      out = extractJson(raw1);
+      out = extractJson(raw);
     } catch {
-      // one strict retry with even shorter instruction
+      // one minimal retry prompt for fence/noise
       const retryInstr = "Return JSON ONLY (no markdown): {\"score\":0-10,\"level\":\"...\",\"reasons\":\"...\",\"suggestions\":[\"...\"]}";
-      let raw2 = await askOnce({ system: SYSTEM_PROMPT, user: retryInstr + "\n\n" + userText });
-      if (debug) return res.status(500).json({ raw1, raw2 });
+      const { raw: raw2, usedModel: used2 } = await robustAsk({ preferredModel: modelOverride || DEFAULT_MODEL, userText: retryInstr + "\n\n" + userText });
+      if (debug) return res.status(500).json({ raw1: raw, raw2, usedModel: used2 });
       out = extractJson(raw2);
     }
 
     const norm = normalizeResult(out);
-    res.json({ ...norm, _meta: { model: MODEL } });
+    res.json({ ...norm, _meta: { model: usedModel } });
   } catch (e) {
-    res.status(500).json({ error: e.message, _meta: { model: MODEL } });
+    // Map provider 400-ish to 503 for frontend clarity
+    const msg = (e && e.message) ? String(e.message) : "Upstream provider error";
+    return res.status(500).json({ error: msg, _meta: { model: DEFAULT_MODEL } });
   }
 });
 
 /* ---- Start ---- */
 const port = process.env.PORT || 8787;
-app.listen(port, () => console.log(`API running on ${port} (model: ${MODEL})`));
+app.listen(port, () => console.log(`API running on ${port} (default model: ${DEFAULT_MODEL})`));
