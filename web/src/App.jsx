@@ -102,7 +102,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900">
       <div className="mx-auto w-full max-w-3xl px-4 py-10">
-        {/* HEADER */}
+        {/* HEADER (updated copy) */}
         <header className="mb-6">
           <h1 className="text-3xl font-semibold tracking-tight">English Native Check</h1>
           <p className="text-sm text-gray-600 mt-1">
@@ -122,10 +122,11 @@ export default function App() {
         <main className="bg-white rounded-2xl shadow-[0_8px_30px_rgba(0,0,0,0.06)] p-6">
           <form onSubmit={handleSubmit} className="space-y-5">
             {[
-              "Part 1 — short paragraph (3–4 sentences)",
-              "Part 2 — explain the idiom 'blessing in disguise'",
-              "Part 3 — choose the natural options (e.g., 'in the evening; suggested going; looking forward to meeting')",
-              "Part 4 — fill: If I ___ known, I would have…",
+              // UPDATED prompts
+              "Part 1 — Write a short paragraph.",
+              "Part 2 — Explain the idiom 'blessing in disguise'.",
+              "Part 3 — Use these fragments in a sentence: 'in the evening; suggested going; looking forward to meeting'.",
+              "Part 4 — Fill in two blanks and reproduce the complete sentence.",
             ].map((label, i) => (
               <div key={i} className="space-y-2">
                 <label className="block text-sm font-medium">{label}</label>
@@ -134,7 +135,7 @@ export default function App() {
                   onChange={(e) => { const copy = answers.slice(); copy[i] = e.target.value; setAnswers(copy); }}
                   className="w-full border rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-black/60"
                   rows={i === 0 ? 4 : 3}
-                  placeholder={`Type your answer for ${label.toLowerCase()}`}
+                  placeholder={`Type your answer for ${label.replace(/^Part \d+\s+—\s+/, "")}`}
                 />
               </div>
             ))}

@@ -1,4 +1,3 @@
-
 // server/index.js
 import dotenv from "dotenv";
 dotenv.config();
@@ -61,10 +60,10 @@ const client = new OpenAI({
   },
 });
 
-// ----- PROMPTS -----
+// ----- PROMPTS (updated to your new wording) -----
 const SYSTEM_PROMPT = "You are a calibrated linguistics examiner. Output STRICT JSON only.";
 const STRICT_JSON_INSTR = `
-You are evaluating a four-part English proficiency test. Return ONLY one JSON object with this schema:
+You are evaluating a four-part English proficiency task. Return ONLY one JSON object with this schema:
 
 {
   "score": number,
@@ -73,10 +72,22 @@ You are evaluating a four-part English proficiency test. Return ONLY one JSON ob
   "suggestions": string[]
 }
 
+Task prompts (what the candidate saw):
+- Part 1 — "Write a short paragraph." (Assess coherence, grammar, vocabulary, collocations, flow; penalize robotic text.)
+- Part 2 — "Explain the idiom 'blessing in disguise'." (Meaning: something initially negative/hidden that leads to a positive outcome.)
+- Part 3 — "Use these fragments in a sentence: 'in the evening; suggested going; looking forward to meeting'." (Assess natural integration and grammar.)
+- Part 4 — "Fill in two blanks and reproduce the complete sentence." (Target form: third conditional — e.g., 'If I had ___ known, I would have ___.' Then present the full corrected sentence.)
+
+Weights (round overall to nearest integer):
+- Part 1 Writing 40%
+- Part 2 Idiom 20%
+- Part 3 Naturalness/Word Choice 20%
+- Part 4 Grammar (3rd conditional) 20%
+
 Guidelines:
 - Return ONE JSON object only, no markdown/preamble.
 - "reasons": brief notes across parts.
-- "suggestions": 3–5 actionable tips.
+- "suggestions": 3–5 actionable tips targeted to the weakest areas.
 `;
 
 // ----- HEALTH + META -----
@@ -149,11 +160,11 @@ app.post("/assess", async (req, res) => {
       return res.json({
         score: 7,
         level: "Advanced",
-        reasons: "Strong writing, correct idiom meaning, minor word choice issues.",
+        reasons: "Clear paragraph; idiom explained; fragments integrated acceptably; minor issues with conditional form.",
         suggestions: [
-          "Vary sentence openings.",
-          "Practice gerund vs infinitive.",
-          "Reinforce 3rd conditional.",
+          "Vary sentence openings and clause structures.",
+          "Tighten punctuation and article usage.",
+          "Reinforce third conditional form ('had + past participle' / 'would have + past participle').",
         ],
         _meta: { model: MODEL },
       });
